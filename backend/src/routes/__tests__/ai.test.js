@@ -302,7 +302,7 @@ describe('AI routes', () => {
     });
     mockHotspotDeleteMany.mockResolvedValue({ acknowledged: true });
     mockHotspotInsertMany.mockResolvedValue([]);
-    mockHotspotFind.mockReturnValueOnce(createHotspotQueryChain([
+    mockHotspotFind.mockReturnValue(createHotspotQueryChain([
       {
         _id: '507f1f77bcf86cd799439222',
         wardId: { _id: '507f1f77bcf86cd799439021', name: 'Ward 21', city: 'Pune' },

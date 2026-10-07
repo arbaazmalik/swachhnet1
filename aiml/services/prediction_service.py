@@ -20,9 +20,9 @@ class PredictionService:
         self.forecast_days = pred_config.get("forecast_days", 30)
 
     def _prepare_series(self, historical_data: list) -> np.ndarray:
-        if not historical_data or len(historical_data) < 3:
-            raise ValueError("INSUFFICIENT_DATA: At least 3 historical data points are required for a reliable trend forecast.")
         values = [float(item.get("value", 0.0)) for item in historical_data]
+        if not values or len(values) < 7:
+            raise ValueError("Not enough historical data for a reliable forecast.")
         return np.array(values, dtype=float)
 
     def _forecast_values(self, series: np.ndarray, days: int) -> list[dict]:

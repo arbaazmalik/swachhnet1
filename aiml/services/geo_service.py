@@ -37,18 +37,25 @@ class GeoHotspotService:
             # Extract coordinates into numpy array
             coords_array = np.array([[point['lat'], point['long']] for point in coordinates_list])
             
-            # Use Haversine distance correctly with radians
-            coords_rad = self._convert_to_radians(coords_array)
-            
-            # For haversine, eps is expected in radians: distance_km / 6371.0
-            # A 500m (0.5km) neighborhood radius corresponds to 0.5 / 6371.0 radians (~0.00007848)
-            eps_rad = (0.5 / 6371.0) if self.metric == 'haversine' and self.eps >= 0.001 else self.eps
+            # For haversine metric, sklearn expects coordinates in radians [lat, lon]
+            # and eps in radians (distance in km / Earth's radius 6371.0 km).
+            if self.metric == 'haversine':
+                # Convert eps from degrees (~111km per deg) to radians
+                eps_km = self.eps * 111.0 if self.eps < 0.1 else self.eps
+                eps_rad = eps_km / 6371.0
+                coords_input = self._convert_to_radians(coords_array)
+                metric_to_use = 'haversine'
+                effective_eps = eps_rad
+            else:
+                coords_input = coords_array
+                metric_to_use = 'euclidean'
+                effective_eps = self.eps
 
             clustering = DBSCAN(
-                eps=eps_rad if self.metric == 'haversine' else self.eps, 
+                eps=effective_eps, 
                 min_samples=self.min_samples, 
-                metric='haversine' if self.metric == 'haversine' else 'euclidean'
-            ).fit(coords_rad if self.metric == 'haversine' else coords_array)
+                metric=metric_to_use
+            ).fit(coords_input)
             
             labels = clustering.labels_
             

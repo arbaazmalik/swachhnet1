@@ -22,87 +22,44 @@ const FILTERS = [
   { value: 'organic',   label: 'Compost/Organic', emoji: '🌱' },
 ]
 
-const CITIES = [
-  { name: 'Pune (Ward 14)', lat: 18.5204, lng: 73.8567 },
-  { name: 'Dhampur',        lat: 29.2882, lng: 78.5031 },
-  { name: 'New Delhi',      lat: 28.6139, lng: 77.2090 },
-  { name: 'Mumbai',         lat: 19.0760, lng: 72.8777 },
-]
-
 export default function MapPage() {
-  const [filter,      setFilter]      = useState('')
+  const [filter,    setFilter]    = useState('')
   const [searchQuery, setSearchQuery] = useState('')
-  const [centers,     setCenters]     = useState([])
-  const [loading,     setLoading]     = useState(false)
-  const [userLoc,     setUserLoc]     = useState(null)
-  const [locating,    setLocating]    = useState(false)
-  const [hoveredId,   setHoveredId]   = useState(null)
-
-  const DEFAULT_LOC = { lat: 18.5204, lng: 73.8567 } // Pune Ward 14
-
-  const locateUser = (isManual = false) => {
-    setLocating(true)
-
-    if (!navigator.geolocation) {
-      toast.error('Geolocation is not supported by your browser')
-      setUserLoc(prev => prev || DEFAULT_LOC)
-      setLocating(false)
-      return
-    }
-
-    // Always show the map immediately with a default so the spinner never blocks
-    setUserLoc(prev => prev || DEFAULT_LOC)
-
-    const onSuccess = pos => {
-      const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude }
-      setUserLoc(coords)
-      setLocating(false)
-      if (isManual) toast.success('📍 Located your current position!')
-    }
-
-    const onError = (err, retried = false) => {
-      console.warn('Geolocation error:', err.message)
-      if (!retried) {
-        // Retry without high accuracy (works better on desktop / some browsers)
-        navigator.geolocation.getCurrentPosition(
-          onSuccess,
-          e => onError(e, true),
-          { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
-        )
-      } else {
-        setLocating(false)
-        if (isManual) toast.error('Could not get your location. Using default.')
-      }
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      onSuccess,
-      err => onError(err, false),
-      { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }
-    )
-  }
+  const [centers,   setCenters]   = useState([])
+  const [loading,   setLoading]   = useState(false)
+  const [userLoc,   setUserLoc]   = useState(null)
+  const [hoveredId, setHoveredId] = useState(null)
 
   useEffect(() => {
-    locateUser(false)
+    // Attempt to get user location, default to Dhampur if denied
+    navigator.geolocation.getCurrentPosition(
+      pos => setUserLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      ()  => {
+        console.log('Location denied, using Dhampur default')
+        setUserLoc({ lat: 29.2882, lng: 78.5031 })
+      }
+    )
   }, [])
 
   useEffect(() => { 
     if (userLoc) fetchCenters(userLoc.lat, userLoc.lng, filter) 
   }, [userLoc, filter])
 
+  const [isLive, setIsLive] = useState(true)
+
   const fetchCenters = async (lat, lng, type) => {
     setLoading(true)
     try {
-      const { data } = await mapAPI.centers(lat, lng, 5000, type)
+      // radius 5km
+      const response = await mapAPI.centers(lat, lng, 5000, type)
+      const data = response?.data || response
       const apiCenters = data?.centers || []
-      
-      if (apiCenters.length > 0) {
-        setCenters(apiCenters)
-      } else {
-        setCenters(RECYCLING_CENTERS)
-      }
+      setIsLive(data?.isLive ?? true)
+      setCenters(apiCenters)
     } catch (err) { 
-      setCenters(RECYCLING_CENTERS)
+      console.warn('Map API Error:', err)
+      setIsLive(false)
+      setCenters([])
     } finally { 
       setLoading(false) 
     }
@@ -128,15 +85,6 @@ export default function MapPage() {
           <h1 className="page-title text-3xl font-bold text-slate-800">Map & Recycling Centers</h1>
           <p className="page-sub text-slate-500 mt-1">Find nearby recycling centers, scrap dealers, and drop-off points</p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => locateUser(true)}
-            disabled={locating}
-            className="btn-primary flex items-center gap-2 text-sm shadow-md"
-          >
-            <span>📍</span> {locating ? 'Locating...' : 'Locate Me'}
-          </button>
-        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
@@ -144,12 +92,12 @@ export default function MapPage() {
         <div className="lg:col-span-2 space-y-4">
           <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
             {/* Filter pills */}
-            <div className="flex gap-2 flex-wrap items-center">
+            <div className="flex gap-2 flex-wrap">
               {FILTERS.map(f => (
                 <button 
                   key={f.value} 
                   onClick={() => setFilter(f.value)}
-                  className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-all duration-200 border
+                  className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-200 border
                     ${filter === f.value 
                       ? 'bg-green-600 text-white border-green-600 shadow-md shadow-green-100' 
                       : 'bg-white text-slate-600 border-slate-200 hover:border-green-400 hover:bg-green-50'}`}
@@ -159,33 +107,16 @@ export default function MapPage() {
               ))}
             </div>
 
-            <div className="flex items-center gap-2 w-full md:w-auto">
-              <select
-                aria-label="City preset"
-                className="select text-xs py-2 px-3 border border-slate-200 rounded-xl bg-white"
-                onChange={e => {
-                  const city = CITIES.find(c => c.name === e.target.value)
-                  if (city) {
-                    setUserLoc({ lat: city.lat, lng: city.lng })
-                    toast.success(`Location set to ${city.name}`)
-                  }
-                }}
-              >
-                <option value="">Jump to City...</option>
-                {CITIES.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
-              </select>
-
-              {/* Search */}
-              <div className="relative flex-1 md:w-56">
-                <input 
-                  type="text" 
-                  placeholder="Search name/area..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none transition-all"
-                />
-                <span className="absolute right-3 top-2.5 text-slate-400 text-xs">🔍</span>
-              </div>
+            {/* Search */}
+            <div className="relative w-full md:w-64">
+              <input 
+                type="text" 
+                placeholder="Search by name or area..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full px-4 py-2 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none transition-all"
+              />
+              <span className="absolute right-3 top-2.5 text-slate-400">🔍</span>
             </div>
           </div>
 

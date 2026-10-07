@@ -26,6 +26,7 @@ const complaintSchema = new Schema({
 
   // Embedded AI result (denormalized for speed)
   aiResult: {
+    status:       { type: String, enum: ['pending', 'processing', 'completed', 'failed'], default: 'pending' },
     wasteType:    String,
     confidence:   Number,
     modelVersion: String,

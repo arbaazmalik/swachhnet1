@@ -1,9 +1,9 @@
-﻿param(
+param(
   [string]$BackendBase = "http://127.0.0.1:5000",
   [string]$ApiBase = "http://127.0.0.1:5000/api/v1",
   [string]$AimlBase = "http://127.0.0.1:8000",
   [bool]$StartAiml = $true,
-  [string]$AimlWorkdir = "D:\swachhanet (2)\swachhanet\aiml",
+  [string]$AimlWorkdir = (Join-Path $PSScriptRoot "..\aiml"),
   [int]$AimlWaitSeconds = 90
 )
 
@@ -107,7 +107,11 @@ try {
     historical_data = @(
       @{ date = "2026-03-20"; value = 120.0 },
       @{ date = "2026-03-21"; value = 132.0 },
-      @{ date = "2026-03-22"; value = 128.0 }
+      @{ date = "2026-03-22"; value = 128.0 },
+      @{ date = "2026-03-23"; value = 135.0 },
+      @{ date = "2026-03-24"; value = 140.0 },
+      @{ date = "2026-03-25"; value = 138.0 },
+      @{ date = "2026-03-26"; value = 145.0 }
     )
     forecast_days = 2
   } | ConvertTo-Json -Depth 4

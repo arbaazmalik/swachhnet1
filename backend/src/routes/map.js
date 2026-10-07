@@ -11,6 +11,11 @@ router.get('/centers', authenticate, async (req, res, next) => {
     const { lat, lng, radius = 5000, type } = req.query;
     if (!lat || !lng) return fail(res, 400, 'lat and lng are required');
 
+    const apiKey = process.env.GMAPS_API_KEY;
+    if (!apiKey || apiKey === 'your_google_maps_key') {
+      return ok(res, { centers: [], isLive: false }, 'Google Places API key is not configured.');
+    }
+
     const cacheKey = `map:centers:${lat}:${lng}:${radius}:${type || 'all'}`;
     const cached   = await get(cacheKey);
     if (cached) return ok(res, cached, 'Centers fetched');
@@ -23,33 +28,30 @@ router.get('/centers', authenticate, async (req, res, next) => {
     };
     const keyword = typeMap[type] || 'waste management recycling';
 
-    if (!process.env.GMAPS_API_KEY || process.env.GMAPS_API_KEY === 'your_google_maps_key') {
-      return ok(res, { centers: [], isLive: false, message: 'Google Places API key is not configured.' }, 'Places API not configured');
-    }
-
+    let gmapsRes;
     try {
-      const gmapsRes = await axios.get('https://maps.googleapis.com/maps/api/place/nearbysearch/json', {
-        params: { location: `${lat},${lng}`, radius, keyword, key: process.env.GMAPS_API_KEY },
-        timeout: 8000,
+      gmapsRes = await axios.get('https://maps.googleapis.com/maps/api/place/nearbysearch/json', {
+        params: { location: `${lat},${lng}`, radius, keyword, key: apiKey },
+        timeout: 10000,
       });
-
-      const centers = (gmapsRes.data.results || []).map(p => ({
-        id:       p.place_id,
-        name:     p.name,
-        lat:      p.geometry.location.lat,
-        lng:      p.geometry.location.lng,
-        address:  p.vicinity,
-        rating:   p.rating,
-        open_now: p.opening_hours?.open_now,
-        types:    p.types,
-      }));
-
-      const response = { centers, isLive: true };
-      await setEx(cacheKey, 3600, response);
-      return ok(res, response, 'Centers fetched');
-    } catch (apiErr) {
-      return ok(res, { centers: [], isLive: false, message: 'Places service temporarily unavailable' }, 'Places API unavailable');
+    } catch (err) {
+      return ok(res, { centers: [], isLive: false, error: err.message }, 'Google Places API unavailable.');
     }
+
+    const centers = (gmapsRes.data?.results || []).map(p => ({
+      id:       p.place_id,
+      name:     p.name,
+      lat:      p.geometry.location.lat,
+      lng:      p.geometry.location.lng,
+      address:  p.vicinity,
+      rating:   p.rating,
+      open_now: p.opening_hours?.open_now,
+      types:    p.types,
+    }));
+
+    const response = { centers, isLive: true };
+    await setEx(cacheKey, 3600, response);
+    return ok(res, response, 'Centers fetched');
   } catch (err) { next(err); }
 });
 
@@ -58,8 +60,15 @@ router.get('/bins', authenticate, async (req, res, next) => {
   try {
     const { ward_id } = req.query;
     const filter = { status: { $in: ['pending', 'assigned', 'in_progress'] }, 'location.coordinates': { $exists: true } };
-    if (ward_id) filter.wardId = ward_id;
-    else if (req.user.wardId) filter.wardId = req.user.wardId;
+    
+    if (req.user.role === 'authority' || req.user.role === 'admin') {
+      const { resolveWardScope } = require('../utils/wardScope');
+      const scope = resolveWardScope(req, ward_id);
+      if (scope.error) return fail(res, scope.error.status, scope.error.message);
+      if (scope.wardId) filter.wardId = scope.wardId;
+    } else if (ward_id) {
+      filter.wardId = ward_id;
+    }
 
     const recent = await Complaint.find(filter)
       .select('location issueType priority updatedAt address')

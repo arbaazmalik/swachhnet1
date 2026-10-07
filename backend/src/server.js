@@ -71,15 +71,19 @@ app.get('/health', (req, res) => {
   res.json({ success: true, data: payload, message: 'Health check ok' });
 });
 
-app.get('/ready', async (req, res) => {
-  const payload = {
-    status: 'ready',
-    service: 'swachhanet-api',
-    db: 'mongodb',
-    redis: 'connected',
-    timestamp: new Date().toISOString()
-  };
-  res.json({ success: true, data: payload, message: 'API ready' });
+app.get('/ready', (req, res) => {
+  const mongoose = require('mongoose');
+  const dbState = mongoose.connection.readyState === 1;
+  const isReady = dbState;
+  const statusCode = isReady ? 200 : 503;
+  res.status(statusCode).json({
+    success: isReady,
+    data: {
+      db: dbState ? 'connected' : 'disconnected',
+      timestamp: new Date().toISOString()
+    },
+    message: isReady ? 'Backend service ready' : 'Backend service not ready'
+  });
 });
 
 const API = '/api/v1';
@@ -124,5 +128,4 @@ if (env.NODE_ENV !== 'test') {
   startServer();
 }
 
-module.exports = server;
-module.exports.app = app;
+module.exports = app;

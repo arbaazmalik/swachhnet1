@@ -4,26 +4,8 @@ const Worker    = require('../models/Worker');
 const Gamification = require('../models/Gamification');
 const { authenticate, authorize } = require('../middleware/auth');
 const { ok } = require('../utils/response');
-const mongoose = require('mongoose');
+const { resolveWardScope } = require('../utils/wardScope');
 
-function resolveWardScope(req, requestedWardId) {
-  if (requestedWardId && !mongoose.isValidObjectId(requestedWardId)) {
-    return { error: { status: 400, message: 'Invalid ward_id' } };
-  }
-
-  if (req.user.role === 'authority') {
-    const ownWardId = req.user.wardId ? String(req.user.wardId) : null;
-    if (!ownWardId) {
-      return { error: { status: 403, message: 'Authority account is not assigned to any ward.' } };
-    }
-    if (requestedWardId && String(requestedWardId) !== ownWardId) {
-      return { error: { status: 403, message: 'Authority users can only access their assigned ward.' } };
-    }
-    return { wardId: ownWardId };
-  }
-
-  return { wardId: requestedWardId || req.user.wardId || undefined };
-}
 
 // GET /reports/dashboard
 router.get('/dashboard', authenticate, authorize('authority', 'admin'), async (req, res, next) => {

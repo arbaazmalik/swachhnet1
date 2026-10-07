@@ -2,9 +2,13 @@ const { Notification } = require('../models/Notification');
 const User             = require('../models/User');
 const logger           = require('../utils/logger');
 
+const { emitRealtimeEvent } = require('./socketService');
+
 async function createNotification(userId, title, body, type, data = {}) {
   try {
-    await Notification.create({ userId, title, body, type, data });
+    const notif = await Notification.create({ userId, title, body, type, data });
+    emitRealtimeEvent({ event: 'notification.created', data: notif, userId });
+    return notif;
   } catch (err) {
     logger.error('createNotification error:', err);
   }

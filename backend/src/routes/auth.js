@@ -17,12 +17,12 @@ const { ok, fail } = require('../utils/response');
 const generateTokens = (userId, role) => ({
   accessToken: jwt.sign(
     { userId, role },
-    env.JWT_SECRET || "fallback_secret_123",
+    env.JWT_SECRET,
     { expiresIn: env.JWT_EXPIRES_IN || '15m' }
   ),
   refreshToken: jwt.sign(
     { userId },
-    env.JWT_REFRESH_SECRET || "fallback_refresh_123",
+    env.JWT_REFRESH_SECRET,
     { expiresIn: env.JWT_REFRESH_EXPIRES_IN || '7d' }
   ),
 });
@@ -51,16 +51,16 @@ function phoneCandidates(phone) {
   return [...out];
 }
 
-const {
-  generateOTP,
-  checkCooldown,
-  recordOtpSent,
-  recordFailedAttempt,
-  clearOtpMeta,
-  sendOtpNotification,
-  OTP_EXPIRY_MS,
-} = require('../services/otpService');
+const otpService = require('../services/otpService');
+const rateLimit = require('express-rate-limit');
 
+const otpRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { success: false, data: null, message: 'Too many OTP requests. Please wait 15 minutes.' },
+});
+
+const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 const shouldExposeOTP = () => process.env.NODE_ENV !== 'production';
 
 function buildOtpPayload(otp) {
@@ -80,12 +80,7 @@ router.post('/register', [
     const { name, phone, email, password, role = 'citizen' } = req.body;
     const normalizedPhone = normalizePhone(phone);
     const candidates = phoneCandidates(phone);
-    
-    const cooldown = checkCooldown(normalizedPhone);
-    if (!cooldown.allowed) {
-      return fail(res, 429, cooldown.error);
-    }
-
+    logger.info(`[REGISTER] Attempt for phone=${normalizedPhone}`);
     const exists = await User.findOne({
       $or: [
         { phone: { $in: candidates } },
@@ -105,12 +100,11 @@ router.post('/register', [
       passwordHash,
       role,
       otpSecret: otp,
-      otpExpiresAt: new Date(Date.now() + OTP_EXPIRY_MS),
+      otpExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      otpAttempts: 0,
     });
     await Gamification.create({ userId: user._id });
-    
-    recordOtpSent(normalizedPhone);
-    await sendOtpNotification(normalizedPhone, otp);
+    await otpService.sendOTP(normalizedPhone, otp);
 
     return ok(
       res,
@@ -125,28 +119,30 @@ router.post('/register', [
 });
 
 // POST /auth/otp/send
-router.post('/otp/send', async (req, res, next) => {
+router.post('/otp/send', otpRateLimiter, async (req, res, next) => {
   try {
     const { phone } = req.body;
     if (!phone) return fail(res, 400, 'Phone required');
     const normalizedPhone = normalizePhone(phone);
     if (!normalizedPhone) return fail(res, 400, 'Invalid phone number');
 
-    const cooldown = checkCooldown(normalizedPhone);
-    if (!cooldown.allowed) {
-      return fail(res, 429, cooldown.error);
+    const existing = await User.findOne({ phone: { $in: phoneCandidates(phone) } });
+    if (!existing) return fail(res, 404, 'User not found');
+
+    if (existing.lastOtpSentAt && (Date.now() - new Date(existing.lastOtpSentAt).getTime() < 60 * 1000)) {
+      const waitSec = Math.ceil((60 * 1000 - (Date.now() - new Date(existing.lastOtpSentAt).getTime())) / 1000);
+      return fail(res, 429, `Please wait ${waitSec} seconds before requesting another OTP.`);
     }
 
     const otp = generateOTP();
-    const user = await User.findOneAndUpdate(
-      { phone: { $in: phoneCandidates(phone) } },
-      { phone: normalizedPhone, otpSecret: otp, otpExpiresAt: new Date(Date.now() + OTP_EXPIRY_MS) }
-    );
-    if (!user) return fail(res, 404, 'User not found');
+    existing.phone = normalizedPhone;
+    existing.otpSecret = otp;
+    existing.otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    existing.otpAttempts = 0;
+    existing.lastOtpSentAt = new Date();
+    await existing.save();
 
-    recordOtpSent(normalizedPhone);
-    await sendOtpNotification(normalizedPhone, otp);
-
+    await otpService.sendOTP(normalizedPhone, otp);
     return ok(res, { phone: normalizedPhone, ...buildOtpPayload(otp) }, 'OTP sent successfully');
   } catch (err) { next(err); }
 });
@@ -156,27 +152,38 @@ router.post('/otp/verify', async (req, res, next) => {
   try {
     const { phone, otp } = req.body;
     if (!phone || !otp) return fail(res, 400, 'Phone and OTP required');
-    const normalizedPhone = normalizePhone(phone) || phone;
     const user = await User.findOne({ phone: { $in: phoneCandidates(phone) } });
     if (!user) return fail(res, 404, 'User not found');
 
-    if (user.otpSecret !== otp || new Date(user.otpExpiresAt) < new Date()) {
-      const attempts = recordFailedAttempt(normalizedPhone);
-      if (attempts >= 5) {
-        // invalidate OTP on max failures
-        user.otpSecret = undefined;
-        user.otpExpiresAt = undefined;
-        await user.save();
-        return fail(res, 429, 'Too many failed verification attempts. Please request a new OTP.');
-      }
-      return fail(res, 400, `Invalid or expired OTP. ${5 - attempts} attempts remaining.`);
+    if (!user.otpSecret || !user.otpExpiresAt) {
+      return fail(res, 400, 'No active OTP request found. Please request a new OTP.');
+    }
+
+    if (user.otpAttempts >= 3) {
+      user.otpSecret = undefined;
+      user.otpExpiresAt = undefined;
+      await user.save();
+      return fail(res, 400, 'Maximum OTP verification attempts exceeded. Please request a new OTP.');
+    }
+
+    if (new Date(user.otpExpiresAt) < new Date()) {
+      user.otpSecret = undefined;
+      user.otpExpiresAt = undefined;
+      await user.save();
+      return fail(res, 400, 'OTP expired. Please request a new OTP.');
+    }
+
+    if (user.otpSecret !== otp) {
+      user.otpAttempts = (user.otpAttempts || 0) + 1;
+      await user.save();
+      return fail(res, 400, `Invalid OTP. ${3 - user.otpAttempts} attempts remaining.`);
     }
 
     user.isVerified = true;
     user.otpSecret = undefined;
     user.otpExpiresAt = undefined;
+    user.otpAttempts = 0;
     await user.save();
-    clearOtpMeta(normalizedPhone);
 
     const tokens = generateTokens(user._id, user.role);
     await RefreshToken.create({ userId: user._id, token: tokens.refreshToken, expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) });
@@ -211,7 +218,7 @@ router.post('/refresh', async (req, res, next) => {
   try {
     const { refreshToken } = req.body;
     if (!refreshToken) return fail(res, 400, 'Refresh token required');
-    const decoded = jwt.verify(refreshToken, env.JWT_REFRESH_SECRET || "fallback_refresh_123");
+    const decoded = jwt.verify(refreshToken, env.JWT_REFRESH_SECRET);
     const stored = await RefreshToken.findOne({ token: refreshToken, expiresAt: { $gt: new Date() } });
     if (!stored) return fail(res, 401, 'Invalid refresh token');
     const user = await User.findById(decoded.userId);

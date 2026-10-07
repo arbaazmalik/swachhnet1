@@ -10,6 +10,8 @@ const userSchema = new Schema({
   isVerified:   { type: Boolean, default: false },
   otpSecret:    { type: String },
   otpExpiresAt: { type: Date },
+  otpAttempts:  { type: Number, default: 0 },
+  lastOtpSentAt:{ type: Date },
   fcmToken:     { type: String },
   avatarUrl:    { type: String },
   profile: {

@@ -12,12 +12,11 @@ describe('Auth API Endpoints', () => {
   };
 
   beforeAll(async () => {
-    // Cleanup test user if exists
-    await User.deleteMany({ phone: testUser.phone });
+    await User.deleteMany({ phone: { $regex: '1234567890' } });
   });
 
   afterAll(async () => {
-    await User.deleteMany({ phone: testUser.phone });
+    await User.deleteMany({ phone: { $regex: '1234567890' } });
   });
 
   test('POST /api/v1/auth/register should register a new user', async () => {

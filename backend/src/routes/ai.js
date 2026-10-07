@@ -8,6 +8,7 @@ const aiService = require('../services/aiService');
 const { createNotification } = require('../services/notificationService');
 const { findBestWorker } = require('../services/workforceService');
 const User = require('../models/User');
+const { resolveWardScope } = require('../utils/wardScope');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 const ALLOWED_IMAGE_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/jpg', 'image/bmp']);
@@ -90,38 +91,14 @@ function dominantIssueType(points = []) {
 function dominantWardId(points = []) {
   const counts = {};
   for (const p of points) {
-    if (!p?.ward_id) continue;
-    counts[p.ward_id] = (counts[p.ward_id] || 0) + 1;
+    const wid = p?.ward_id || (p?.wardId?._id ? String(p.wardId._id) : (p?.wardId ? String(p.wardId) : null));
+    if (!wid) continue;
+    counts[wid] = (counts[wid] || 0) + 1;
   }
   return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
 }
 
-const { emitHotspotUpdated } = require('../services/socketService');
-
-function resolveWardScope(req, requestedWardId) {
-  if (requestedWardId && !mongoose.isValidObjectId(requestedWardId)) {
-    return { error: { status: 400, message: 'Invalid ward_id' } };
-  }
-
-  const role = req.user?.role;
-  const ownWardId = req.user?.wardId ? String(req.user.wardId) : null;
-
-  if (role === 'authority') {
-    if (!ownWardId) {
-      return { error: { status: 403, message: 'Authority account is not assigned to any ward.' } };
-    }
-    if (requestedWardId && String(requestedWardId) !== ownWardId) {
-      return { error: { status: 403, message: 'Authority users can only access their assigned ward.' } };
-    }
-    return { wardId: ownWardId };
-  }
-
-  if (role === 'admin') {
-    return { wardId: requestedWardId || undefined };
-  }
-
-  return { error: { status: 403, message: 'Insufficient permissions' } };
-}
+// Using centralized resolveWardScope helper from ../utils/wardScope
 
 async function generateHotspotsFromComplaints({ wardId, days, persist = true }) {
   const since = new Date(Date.now() - Number(days) * 24 * 60 * 60 * 1000);
@@ -164,7 +141,9 @@ async function generateHotspotsFromComplaints({ wardId, days, persist = true }) 
   const clusters = Array.isArray(detection?.clusters) ? detection.clusters : [];
 
   // Fetch previous hotspots for trend detection
-  const prevHotspots = await Hotspot.find({ wardId, periodDays: days }).lean();
+  const prevFilter = buildHotspotDeleteFilter(wardId, days);
+  const rawPrev = await Hotspot.find(prevFilter);
+  const prevHotspots = (rawPrev && typeof rawPrev.lean === 'function') ? await rawPrev.lean() : (Array.isArray(rawPrev) ? rawPrev : []);
 
   const docs = await Promise.all(clusters.map(async (cluster) => {
     const points = Array.isArray(cluster.points) ? cluster.points : [];
@@ -314,13 +293,28 @@ async function predictTrendHandler(req, res, next) {
   try {
     const { historical_data, forecast_days } = req.body;
     if (!Array.isArray(historical_data) || historical_data.length === 0) {
-      return sendFail(res, 400, 'Array of historical_data required');
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'INSUFFICIENT_DATA',
+          message: 'Array of historical_data required and must not be empty.',
+        }
+      });
     }
 
     const result = await aiService.predictTrend(historical_data, forecast_days);
     return sendSuccess(res, result, 'Trend prediction completed');
   } catch (err) {
     if (err.code === 'ECONNREFUSED') return sendFail(res, 503, 'AIML service unavailable');
+    if (err.response && (err.response.status === 400 || err.response.status === 422)) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'INSUFFICIENT_DATA',
+          message: err.response.data?.detail || 'Not enough historical data for a reliable forecast.',
+        }
+      });
+    }
     return next(err);
   }
 }
@@ -412,23 +406,13 @@ router.post('/hotspots/refresh', authenticate, authorize('authority', 'admin'), 
       .lean();
 
     const hotspots = hotspotsDocs.map(normalizeHotspotDoc);
-    if (hotspots.length > 0) {
-      hotspots.forEach(h => emitHotspotUpdated(h));
-    }
     return sendSuccess(res, { hotspots, days }, 'Hotspots refreshed');
   } catch (err) {
     return next(err);
   }
 });
 
-router.get('/status', authenticate, async (req, res, next) => {
-  try {
-    const readiness = await aiService.checkReadiness();
-    return sendSuccess(res, readiness, 'AI service status');
-  } catch (err) {
-    return next(err);
-  }
-});
+
 
 router.get('/heatmap', authenticate, async (req, res, next) => {
   try {

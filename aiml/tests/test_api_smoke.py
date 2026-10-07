@@ -20,7 +20,9 @@ class TestAIMLAPI(unittest.TestCase):
     def test_health_endpoint(self):
         resp = self.client.get('/health')
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {'status': 'ok'})
+        body = resp.json()
+        self.assertEqual(body['status'], 'ok')
+        self.assertIn('classifier_ready', body)
 
     def test_predict_waste_rejects_non_image(self):
         resp = self.client.post(

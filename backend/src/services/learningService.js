@@ -233,7 +233,17 @@ async function submitQuiz(userId, payload) {
     { new: true, upsert: true }
   );
 
-  await awardPoints(userId, 'quiz_passed', totalPoints);
+  const previousPassed = await QuizAttempt.findOne({
+    userId,
+    moduleId: module._id,
+    passed: true,
+    _id: { $ne: attempt._id },
+  });
+
+  const pointsToAward = (passed && !previousPassed) ? totalPoints : 0;
+  if (pointsToAward > 0) {
+    await awardPoints(userId, 'quiz_passed', pointsToAward);
+  }
 
   return {
     status: 200,
@@ -360,19 +370,20 @@ async function getUserProgress(userId) {
 
 async function updateGamification(userId, payload = {}) {
   const action = payload.action;
-  const customPoints = typeof payload.points === 'number' ? payload.points : null;
+  const { POINTS_MAP } = require('./gamificationService');
 
-  if (!action && customPoints === null) {
-    return { status: 400, error: 'action or points is required' };
+  if (!action || !POINTS_MAP[action]) {
+    return { status: 400, error: 'Invalid or unsupported gamification action.' };
   }
 
-  const result = await awardPoints(userId, action || 'custom', customPoints);
+  // Prevent users from granting themselves arbitrary points
+  const result = await awardPoints(userId, action);
   const profile = await Gamification.findOne({ userId }).lean();
 
   return {
     status: 200,
     data: {
-      awarded: result?.points || customPoints || 0,
+      awarded: result?.points || 0,
       newBadges: result?.newBadges || [],
       level: result?.level || profile?.level || 1,
       gamification: profile || {},

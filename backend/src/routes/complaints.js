@@ -17,8 +17,22 @@ const { notifyCitizen }           = require('../services/notificationService');
 const { queueAIClassification }   = require('../jobs/aiQueue');
 const logger = require('../utils/logger');
 const { ok, fail } = require('../utils/response');
+const { resolveWardScope } = require('../utils/wardScope');
+const { emitRealtimeEvent } = require('../services/socketService');
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+const ALLOWED_IMAGE_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/jpg']);
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (ALLOWED_IMAGE_MIME.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('INVALID_FILE_TYPE: Only JPEG, PNG, and WebP images are permitted.'));
+    }
+  },
+});
 const imagekit = (process.env.IMAGEKIT_PUBLIC_KEY && process.env.IMAGEKIT_PRIVATE_KEY && process.env.IMAGEKIT_URL_ENDPOINT)
   ? new ImageKit({
       publicKey: process.env.IMAGEKIT_PUBLIC_KEY,
@@ -40,35 +54,7 @@ const SORT_MAP = {
   priority_low: { priority: 1, createdAt: -1 },
 };
 
-const {
-  emitComplaintCreated,
-  emitComplaintStatusChanged,
-  emitComplaintAssigned,
-  emitComplaintUpdated,
-} = require('../services/socketService');
-
-function resolveWardScope(req, requestedWardId) {
-  if (requestedWardId && !mongoose.isValidObjectId(requestedWardId)) {
-    return { error: { status: 400, message: 'Invalid ward_id' } };
-  }
-
-  if (req.user.role === 'authority') {
-    const ownWardId = req.user.wardId ? String(req.user.wardId) : null;
-    if (!ownWardId) {
-      return { error: { status: 403, message: 'Authority account is not assigned to any ward.' } };
-    }
-    if (requestedWardId && String(requestedWardId) !== ownWardId) {
-      return { error: { status: 403, message: 'Authority users can only access their assigned ward.' } };
-    }
-    return { wardId: ownWardId };
-  }
-
-  if (req.user.role === 'admin') {
-    return { wardId: requestedWardId || undefined };
-  }
-
-  return { wardId: undefined };
-}
+// Using centralized resolveWardScope helper from ../utils/wardScope
 
 async function uploadToStorage(buffer, mimetype) {
   const uploadsDir = path.resolve(__dirname, '../../uploads/complaints');
@@ -143,7 +129,6 @@ router.post('/', authenticate, upload.single('image'), async (req, res, next) =>
       issueType: issue_type,
       priority,
       imageUrl,
-      classificationStatus: imageUrl ? 'pending' : 'completed',
       location:  { type: 'Point', coordinates: [parseFloat(lng), parseFloat(lat)] },
       address,
       description: description || '',
@@ -158,8 +143,8 @@ router.post('/', authenticate, upload.single('image'), async (req, res, next) =>
     }
     await awardPoints(req.user._id, 'complaint_submitted');
     if (priority >= 3) await notifyAuthorities(complaint);
-    
-    emitComplaintCreated(complaint);
+
+    emitRealtimeEvent({ event: 'complaint.created', data: complaint, wardId: complaint.wardId, role: 'authority' });
 
     logger.info(`New complaint [${issue_type}] by ${req.user._id}`);
     return ok(res, { complaint }, 'Complaint submitted', 201);
@@ -214,8 +199,14 @@ router.get('/:id', authenticate, async (req, res, next) => {
     if (!mongoose.isValidObjectId(req.params.id)) return fail(res, 400, 'Invalid complaint id');
 
     const baseFilter = { _id: req.params.id };
-    if (req.user.role === 'citizen') baseFilter.userId = req.user._id;
-    if (req.user.role === 'authority' && req.user.wardId) baseFilter.wardId = req.user.wardId;
+    if (req.user.role === 'citizen') {
+      baseFilter.userId = req.user._id;
+    } else if (req.user.role === 'authority') {
+      if (!req.user.wardId) {
+        return fail(res, 403, 'Authority account is not assigned to a ward.');
+      }
+      baseFilter.wardId = req.user.wardId;
+    }
 
     const complaint = await Complaint.findOne(baseFilter)
       .populate('userId', 'name phone')
@@ -235,24 +226,50 @@ router.put('/:id/status', authenticate, authorize('authority', 'admin'), async (
     if (!valid.includes(status)) return fail(res, 400, 'Invalid status');
     if (!mongoose.isValidObjectId(req.params.id)) return fail(res, 400, 'Invalid complaint id');
 
+    if (req.user.role === 'authority' && !req.user.wardId) {
+      return fail(res, 403, 'Authority account is not assigned to a ward.');
+    }
+
+    const updateFilter = (req.user.role === 'authority')
+      ? { _id: req.params.id, wardId: req.user.wardId }
+      : { _id: req.params.id };
+
+    const current = await Complaint.findOne(updateFilter);
+    if (!current) return fail(res, 404, 'Complaint not found');
+
+    const ALLOWED_TRANSITIONS = {
+      pending: ['assigned', 'rejected', 'in_progress', 'resolved'],
+      assigned: ['in_progress', 'resolved', 'rejected', 'pending'],
+      in_progress: ['resolved', 'rejected'],
+      resolved: [],
+      rejected: ['pending'],
+    };
+
+    if (current.status !== status) {
+      const allowed = ALLOWED_TRANSITIONS[current.status] || [];
+      if (!allowed.includes(status)) {
+        return fail(res, 400, `Invalid status transition from "${current.status}" to "${status}"`);
+      }
+    }
+
     const update = { status, rejectionNote: rejection_note || undefined };
     if (status === 'resolved') update.resolvedAt = new Date();
 
     const complaint = await Complaint.findOneAndUpdate(
-      req.user.role === 'authority' && req.user.wardId
-        ? { _id: req.params.id, wardId: req.user.wardId }
-        : { _id: req.params.id },
+      updateFilter,
       update,
       { new: true }
     );
-    if (!complaint) return fail(res, 404, 'Complaint not found');
+
     await notifyCitizen(
       complaint.userId,
       `Complaint ${status.replace('_', ' ')}`,
       `Your complaint status is now "${status.replace('_', ' ')}".`,
       { complaintId: complaint._id, status }
     );
-    emitComplaintStatusChanged(complaint);
+
+    emitRealtimeEvent({ event: 'complaint.status_changed', data: { complaintId: complaint._id, status, resolvedAt: complaint.resolvedAt }, wardId: complaint.wardId, userId: complaint.userId });
+
     return ok(res, { complaint }, 'Complaint status updated');
   } catch (err) { next(err); }
 });
@@ -265,27 +282,22 @@ router.post('/:id/assign', authenticate, authorize('authority', 'admin'), async 
     if (!mongoose.isValidObjectId(req.params.id)) return fail(res, 400, 'Invalid complaint id');
     if (!mongoose.isValidObjectId(worker_id)) return fail(res, 400, 'Invalid worker_id');
 
-    const worker = await Worker.findById(worker_id);
+    if (req.user.role === 'authority' && !req.user.wardId) {
+      return fail(res, 403, 'Authority account is not assigned to a ward.');
+    }
+
+    const worker = await Worker.findById(worker_id).lean();
     if (!worker) return fail(res, 404, 'Worker not found');
-    if (req.user.role === 'authority' && req.user.wardId && worker.wardId && String(worker.wardId) !== String(req.user.wardId)) {
+    if (req.user.role === 'authority' && String(worker.wardId) !== String(req.user.wardId)) {
       return fail(res, 403, 'Worker does not belong to your ward');
     }
 
-    // Attach wardId to worker if missing
-    if (req.user.wardId && !worker.wardId) {
-      worker.wardId = req.user.wardId;
-    }
-    worker.status = 'busy';
-    if (!worker.assignedTasks) worker.assignedTasks = [];
-    if (!worker.assignedTasks.includes(req.params.id)) {
-      worker.assignedTasks.push(req.params.id);
-    }
-    await worker.save();
+    const assignFilter = (req.user.role === 'authority')
+      ? { _id: req.params.id, wardId: req.user.wardId }
+      : { _id: req.params.id };
 
     const complaint = await Complaint.findOneAndUpdate(
-      req.user.role === 'authority' && req.user.wardId
-        ? { _id: req.params.id, wardId: req.user.wardId }
-        : { _id: req.params.id },
+      assignFilter,
       {
         status: 'assigned',
         $push: {
@@ -305,8 +317,10 @@ router.post('/:id/assign', authenticate, authorize('authority', 'admin'), async 
       'Your complaint has been assigned to a field worker.',
       { complaintId: complaint._id, workerId: worker_id }
     );
-    emitComplaintAssigned(complaint, worker);
-    return ok(res, { complaint, worker }, 'Worker assigned successfully', 201);
+
+    emitRealtimeEvent({ event: 'complaint.assigned', data: { complaintId: complaint._id, workerId: worker_id }, wardId: complaint.wardId, userId: complaint.userId });
+
+    return ok(res, { complaint }, 'Worker assigned', 201);
   } catch (err) { next(err); }
 });
 

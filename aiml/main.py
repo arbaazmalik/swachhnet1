@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
+from contextlib import asynccontextmanager
 from utils.config_loader import load_config
 from utils.logger import get_logger
+from services.image_service import image_service
 
 logger = get_logger(__name__)
 
@@ -14,10 +16,24 @@ except Exception as e:
     logger.error(f"Failed to load configuration: {e}")
     config = {}
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Initializing AI service model startup sequence...")
+    try:
+        loaded = image_service.load_model()
+        if loaded:
+            logger.info("MobileNetV2 Waste Classifier model READY.")
+        else:
+            logger.warn("MobileNetV2 Waste Classifier model UNAVAILABLE on startup.")
+    except Exception as e:
+        logger.error(f"Error during startup model initialization: {e}")
+    yield
+
 app = FastAPI(
     title="EcoIntellect AI Backend",
     description="AI/ML Backend for Waste Management System",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # CORS Middleware
@@ -33,35 +49,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from services.image_service import image_service
-
-@app.on_event("startup")
-async def startup_event():
-    try:
-        logger.info("Initializing AI models at startup...")
-        image_service.is_ready()
-        logger.info("AI model initialization completed.")
-    except Exception as e:
-        logger.warn(f"AI model startup initialization note: {e}")
-
 @app.get("/")
 async def root():
     return {"message": "Welcome to EcoIntellect AI Backend"}
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "aiml"}
+    return {
+        "status": "ok",
+        "classifier_ready": image_service.is_ready,
+        "device": str(image_service.device)
+    }
 
 @app.get("/ready")
-@app.get("/api/v1/ready")
 async def readiness_check():
-    status = image_service.get_status()
-    return {"status": "ready" if status["ready"] else "degraded", **status}
+    return {
+        "ready": image_service.is_ready,
+        "classifier_status": "READY" if image_service.is_ready else "UNAVAILABLE",
+        "model_version": image_service.model_version
+    }
 
-# We will include routers from api.routes here later
 from api.routes import router as api_router
 app.include_router(api_router, prefix="/api/v1")
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
