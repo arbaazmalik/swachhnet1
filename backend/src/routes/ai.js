@@ -325,8 +325,8 @@ async function predictTrendHandler(req, res, next) {
   }
 }
 
-// Legacy classify route used by citizen report flow
-router.post('/classify', authenticate, uploadImage, async (req, res, next) => {
+// Legacy classify route used by citizen report flow (no auth required — UX helper only)
+router.post('/classify', uploadImage, async (req, res, next) => {
   try {
     const file = extractUploadedFile(req);
     if (!file) return sendFail(res, 400, 'Image required');

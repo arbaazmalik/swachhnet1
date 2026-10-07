@@ -8,7 +8,7 @@ server:
   reload: true
 
 model_paths:
-  waste_classifier: "models/waste_classifier/model.pth"
+  waste_classifier: "models/waste_classifier/best_model.pth"
   hotspot_model: "models/hotspot_model/dbscan_model.pkl"
   prediction_model: "models/prediction_model/prophet_model.pkl"
 
@@ -25,8 +25,8 @@ classifier:
   model_architecture: "mobilenet_v2"
 
 hotspot:
-  eps: 0.005 # ~500 meters
-  min_samples: 5
+  eps: 0.005  # ~500 meters radius per cluster
+  min_samples: 3  # 3 nearby complaints = hotspot
   metric: "haversine"
 
 prediction:
