@@ -64,7 +64,7 @@ async function uploadToStorage(buffer, mimetype) {
 
   if (imagekit) {
     try {
-      const uploadRes = await imagekit.files.upload({
+      const uploadRes = await imagekit.upload({
         file: buffer.toString('base64'),
         fileName: filename,
         folder: process.env.IMAGEKIT_FOLDER || '/swachhanet/complaints',
